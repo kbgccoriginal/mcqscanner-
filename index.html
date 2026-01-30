@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Realtime MCQ Answer Sheet Scanner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  background:#f4f6f8;
+  margin:0;
+  padding:15px;
+}
+h1{text-align:center;}
+.container{
+  max-width:1100px;
+  margin:auto;
+  background:#fff;
+  padding:15px;
+  border-radius:10px;
+  box-shadow:0 4px 12px rgba(0,0,0,0.1);
+}
+.section{margin-bottom:20px;}
+button{
+  padding:10px;
+  font-size:16px;
+  background:#2563eb;
+  color:#fff;
+  border:none;
+  border-radius:6px;
+  margin-top:8px;
+  width:100%;
+}
+button.secondary{background:#059669;}
+video{
+  width:100%;
+  border-radius:8px;
+  background:black;
+}
+canvas{display:none;}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+  gap:8px;
+}
+.answer-box{
+  border:1px solid #ddd;
+  padding:8px;
+  border-radius:6px;
+  font-size:14px;
+  text-align:center;
+}
+.good{color:green;font-weight:bold;}
+.bad{color:red;font-weight:bold;}
+.result{font-size:18px;font-weight:bold;margin-top:10px;}
+</style>
+</head>
+
+<body>
+<h1>📄 Realtime MCQ Answer Sheet Scanner</h1>
+
+<div class="container">
+
+  <!-- ===== ANSWER KEY SETUP ===== -->
+  <div class="section">
+    <h3>1️⃣ Setup Answer Key</h3>
+    <label>Number of Questions</label>
+    <input type="number" id="numQuestions" value="10" min="1" max="100">
+
+    <label>Options per Question</label>
+    <select id="numOptions">
+      <option value="4">4 (A–D)</option>
+      <option value="5">5 (A–E)</option>
+    </select>
+
+    <button onclick="generateKeyUI()">Generate Answer Key</button>
+    <div id="answerKeyArea" class="grid" style="margin-top:10px;"></div>
+  </div>
+
+  <!-- ===== CAMERA + SCAN ===== -->
+  <div class="section">
+    <h3>2️⃣ Camera</h3>
+    <button onclick="startCamera()">📷 Start Camera</button>
+    <video id="video" playsinline autoplay muted></video>
+    <button class="secondary" onclick="scanSheet()">📄 Scan Sheet</button>
+  </div>
+
+  <!-- ===== RESULTS ===== -->
+  <div class="section">
+    <h3>3️⃣ Results</h3>
+    <div id="scoreBox" class="result">No scan yet</div>
+    <div id="resultArea" class="grid"></div>
+  </div>
+
+  <canvas id="canvas"></canvas>
+</div>
+
+<script>
+let stream = null;
+let answerKey = [];
+let detectedAnswers = [];
+
+/* ===================== ANSWER KEY UI ===================== */
+function generateKeyUI() {
+  const q = parseInt(document.getElementById("numQuestions").value);
+  const opt = parseInt(document.getElementById("numOptions").value);
+  const area = document.getElementById("answerKeyArea");
+  area.innerHTML = "";
+  answerKey = [];
+
+  for (let i = 0; i < q; i++) {
+    const box = document.createElement("div");
+    box.className = "answer-box";
+    let html = `<b>Q${i+1}</b><br>`;
+    for (let j = 0; j < opt; j++) {
+      const letter = String.fromCharCode(65 + j);
+      html += `
+        <label style="margin-right:6px;">
+          <input type="radio" name="q${i}" value="${letter}">
+          ${letter}
+        </label>
+      `;
+    }
+    box.innerHTML = html;
+    area.appendChild(box);
+  }
+}
+
+/* ===================== CAMERA ===================== */
+async function startCamera() {
+  try {
+    const video = document.getElementById("video");
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+  } catch (e) {
+    alert("Camera error: " + e.message + "\n\nMake sure:\n• Page opened via HTTPS\n• Camera permission allowed\n• Using Safari/Chrome");
+  }
+}
+
+/* ===================== SCAN SHEET ===================== */
+function scanSheet() {
+  readAnswerKeyFromUI();
+
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+
+  if (!video.videoWidth) {
+    alert("Camera not ready yet.");
+    return;
+  }
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const qCount = answerKey.length;
+  const optCount = parseInt(document.getElementById("numOptions").value);
+
+  detectedAnswers = [];
+
+  /* ===== ASSUMED TEMPLATE REGION =====
+     Works best when:
+     - Paper is straight
+     - Answers in neat rows
+     - One row per question
+     - Even spacing
+  */
+  const startX = canvas.width * 0.15;
+  const endX   = canvas.width * 0.85;
+  const startY = canvas.height * 0.2;
+  const endY   = canvas.height * 0.9;
+
+  const rowHeight = (endY - startY) / qCount;
+  const colWidth  = (endX - startX) / optCount;
+
+  for (let q = 0; q < qCount; q++) {
+    let darkest = 999999;
+    let selected = null;
+
+    for (let o = 0; o < optCount; o++) {
+      const x = startX + o * colWidth;
+      const y = startY + q * rowHeight;
+
+      const brightness = regionBrightness(ctx, x, y, colWidth * 0.6, rowHeight * 0.6);
+
+      if (brightness < darkest) {
+        darkest = brightness;
+        selected = String.fromCharCode(65 + o);
+      }
+    }
+
+    detectedAnswers.push(selected);
+  }
+
+  evaluate();
+}
+
+/* ===================== IMAGE PROCESSING ===================== */
+function regionBrightness(ctx, x, y, w, h) {
+  const img = ctx.getImageData(x, y, w, h);
+  let sum = 0;
+  for (let i = 0; i < img.data.length; i += 4) {
+    const r = img.data[i];
+    const g = img.data[i+1];
+    const b = img.data[i+2];
+    sum += (r + g + b) / 3;
+  }
+  return sum / (img.data.length / 4);
+}
+
+/* ===================== EVALUATION ===================== */
+function readAnswerKeyFromUI() {
+  const q = parseInt(document.getElementById("numQuestions").value);
+  answerKey = [];
+  for (let i = 0; i < q; i++) {
+    const radios = document.querySelectorAll(`input[name="q${i}"]`);
+    let val = null;
+    radios.forEach(r => { if (r.checked) val = r.value; });
+    answerKey.push(val);
+  }
+}
+
+function evaluate() {
+  let correct = 0;
+  let wrong = 0;
+  const area = document.getElementById("resultArea");
+  area.innerHTML = "";
+
+  for (let i = 0; i < answerKey.length; i++) {
+    const ok = detectedAnswers[i] === answerKey[i];
+    if (ok) correct++;
+    else wrong++;
+
+    const box = document.createElement("div");
+    box.className = "answer-box";
+    box.innerHTML = `
+      <b>Q${i+1}</b><br>
+      Detected: ${detectedAnswers[i] || "-"}<br>
+      Correct: ${answerKey[i] || "-"}<br>
+      <span class="${ok ? "good" : "bad"}">${ok ? "✔ Correct" : "✘ Wrong"}</span>
+    `;
+    area.appendChild(box);
+  }
+
+  document.getElementById("scoreBox").innerHTML =
+    `✅ Correct: ${correct} | ❌ Wrong: ${wrong} | 🎯 Score: ${correct}/${answerKey.length}`;
+}
+
+/* ===================== INIT ===================== */
+generateKeyUI();
+</script>
+</body>
+</html>
